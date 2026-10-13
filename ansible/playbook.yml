@@ -1,0 +1,159 @@
+
+---
+- name: Prepare server for PrestaShop
+  hosts: prestashop
+  become: true
+
+  vars:
+    prestashop_dir: /var/www/prestashop
+    db_name: prestashop
+    db_user: prestashop_user
+    db_password: 272015
+
+  tasks:
+    - name: Update apt package cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install Apache, MariaDB, PHP and required extensions
+      ansible.builtin.apt:
+        name:
+          - apache2
+          - mariadb-server
+          - php
+          - php-cli
+          - php-mysql
+          - php-curl
+          - php-gd
+          - php-intl
+          - php-mbstring
+          - php-xml
+          - php-zip
+          - php-soap
+          - php-bcmath
+          - libapache2-mod-php
+          - python3-pymysql
+          - unzip
+          - curl
+        state: present
+
+    - name: Enable Apache rewrite module
+      community.general.apache2_module:
+        name: rewrite
+        state: present
+      notify: Restart Apache
+
+    - name: Ensure Apache is running
+      ansible.builtin.service:
+        name: apache2
+        state: started
+        enabled: true
+
+    - name: Ensure MariaDB is running
+      ansible.builtin.service:
+        name: mariadb
+        state: started
+        enabled: true
+
+    - name: Create PrestaShop database
+      community.mysql.mysql_db:
+        name: "{{ db_name }}"
+        state: present
+        login_unix_socket: /run/mysqld/mysqld.sock
+
+
+    - name: Create PrestaShop database user
+      community.mysql.mysql_user:
+        name: "{{ db_user }}"
+        password: "{{ db_password }}"
+        priv: "{{ db_name }}.*:ALL"
+        host: localhost
+        state: present
+        login_unix_socket: /run/mysqld/mysqld.sock
+      no_log: true
+
+    - name: Create PrestaShop web directory
+      ansible.builtin.file:
+        path: "{{ prestashop_dir }}"
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: "0755"
+
+    - name: Create temporary download directory
+      ansible.builtin.file:
+        path: /tmp/prestashop-package
+        state: directory
+        mode: "0755"
+
+    - name: Download official PrestaShop release
+      ansible.builtin.get_url:
+        url: https://assets.prestashop3.com/dst/edition/corporate/9.1.5-5.0/prestashop_edition_basic_version_9.1.5-5.0.zip
+        dest: /tmp/prestashop_9.2.0.zip
+        mode: "0644"
+
+    - name: Extract PrestaShop distribution package
+      ansible.builtin.unarchive:
+        src: /tmp/prestashop_9.2.0.zip
+        dest: /tmp/prestashop-package
+        remote_src: true
+        creates: /tmp/prestashop-package/index.php
+
+    - name: Extract PrestaShop application files
+      ansible.builtin.unarchive:
+        src: /tmp/prestashop-package/prestashop.zip
+        dest: "{{ prestashop_dir }}"
+        remote_src: true
+        creates: "{{ prestashop_dir }}/index.php"
+
+    - name: Set PrestaShop file ownership
+      ansible.builtin.file:
+        path: "{{ prestashop_dir }}"
+        owner: www-data
+        group: www-data
+        recurse: true
+
+    - name: Configure Apache virtual host
+      ansible.builtin.copy:
+        dest: /etc/apache2/sites-available/prestashop.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          <VirtualHost *:80>
+              ServerName _
+              DocumentRoot {{ prestashop_dir }}
+
+              <Directory {{ prestashop_dir }}>
+                  AllowOverride All
+                  Require all granted
+              </Directory>
+
+              ErrorLog ${APACHE_LOG_DIR}/prestashop-error.log
+              CustomLog ${APACHE_LOG_DIR}/prestashop-access.log combined
+          </VirtualHost>
+      notify: Restart Apache
+
+    - name: Enable PrestaShop virtual host
+      ansible.builtin.command:
+        cmd: a2ensite prestashop.conf
+        creates: /etc/apache2/sites-enabled/prestashop.conf
+      notify: Restart Apache
+
+    - name: Disable default Apache site
+      ansible.builtin.command:
+        cmd: a2dissite 000-default.conf
+        removes: /etc/apache2/sites-enabled/000-default.conf
+      notify: Restart Apache
+    
+    - name: Remove PrestaShop installer directory
+      ansible.builtin.file:
+        path: "{{ prestashop_dir }}/install"
+        state: absent
+
+  handlers:
+    - name: Restart Apache
+      ansible.builtin.service:
+        name: apache2
+        state: restarted
